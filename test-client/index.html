@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <title>Cliente Pong WebSocket Desacoplado</title>
+</head>
+<body>
+    <h1>Cliente WebSocket Desacoplado</h1>
+    <p>Conectando ao servidor Go em <strong>ws://localhost:8080/ws</strong>.</p>
+    <p>Abra o console (F12) para inspecionar os logs de conexão e mensagens.</p>
+    <script>
+        // URL fixa apontando especificamente para a porta 8080 do servidor Go
+        const wsUrl = "ws://localhost:8080/ws";
+        console.log("Conectando ao servidor Go em:", wsUrl);
+
+        const ws = new WebSocket(wsUrl);
+
+        ws.onopen = () => {
+            console.log("Conectado com sucesso ao servidor Go!");
+        };
+
+        ws.onmessage = (event) => {
+            console.log("Mensagem recebida do Go:", event.data);
+        };
+
+        ws.onclose = (event) => {
+            console.log(`Conexão encerrada pelo servidor Go. Código: ${event.code}`);
+        };
+
+        ws.onerror = (error) => {
+            console.error("Erro na conexão WebSocket:", error);
+        };
+    </script>
+</body>
+</html>

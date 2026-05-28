@@ -1,0 +1,11 @@
+services:
+  pong-server:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: pong_server_container
+    ports:
+      - "8080:8080"
+    environment:
+      - PORT=8080
+    restart: always
