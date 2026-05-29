@@ -12,41 +12,46 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// Upgrader para converter conexões HTTP em WebSockets
+// Prazos limites para detecção de conexões fantasmas
+const (
+	writeWait  = 2 * time.Second  // Tempo máximo para tentar escrever uma mensagem
+	pongWait   = 10 * time.Second // Tempo limite esperando a resposta do Pong
+	pingPeriod = 4 * time.Second  // Frequência de envio de pings (deve ser menor que pongWait)
+)
+
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
-		return true // Permite qualquer origem para facilidade de testes online
+		return true
 	},
 }
 
-// Manager coordena as duas conexões de rede ativas e as conecta com o motor de estados
+// Manager coordena conexões de rede ativas com suporte a detecção de zumbis via Ping/Pong
 type Manager struct {
 	mu          sync.Mutex
 	PlayerLeft  *websocket.Conn
 	PlayerRight *websocket.Conn
 	Engine      *game.Engine
+	tickCount   int // Contador de ticks para o controle de Ping em background
 }
 
-// NewManager cria e configura um gerenciador de lobby integrado com a engine física
+// NewManager cria e configura uma nova instância do gerenciador de lobby
 func NewManager(engine *game.Engine) *Manager {
 	return &Manager{
 		Engine: engine,
 	}
 }
 
-// SetupMessage define o JSON de boas-vindas do jogador
 type SetupMessage struct {
 	Type string `json:"type"`
 	Side string `json:"side"`
 }
 
-// ClientMessage representa o formato unificado de inputs recebidos do cliente (ESP32)
 type ClientMessage struct {
 	Type string  `json:"type"`
-	Dir  float64 `json:"dir"` // Utilizado quando Type == "input" (movimento)
+	Dir  float64 `json:"dir"`
 }
 
-// HandleWS processa handshakes de novos clientes na rota /ws
+// HandleWS processa conexões de WebSocket e define as políticas de timeouts e pings
 func (m *Manager) HandleWS(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -54,10 +59,19 @@ func (m *Manager) HandleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Define políticas iniciais de leitura para detecção de queda
+	conn.SetReadLimit(512) // Limita o tamanho do pacote para segurança
+	conn.SetReadDeadline(time.Now().Add(pongWait))
+	
+	// Sempre que o cliente responder ao nosso "Ping" com um "Pong", renovamos a data limite de leitura
+	conn.SetPongHandler(func(string) error {
+		conn.SetReadDeadline(time.Now().Add(pongWait))
+		return nil
+	})
+
 	m.mu.Lock()
 	var assignedSide string
 
-	// Registra o cliente na vaga livre
 	if m.PlayerLeft == nil {
 		m.PlayerLeft = conn
 		assignedSide = "left"
@@ -78,7 +92,6 @@ func (m *Manager) HandleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Calcula quantidade de jogadores ativos e avisa a engine
 	count := 0
 	if m.PlayerLeft != nil {
 		count++
@@ -89,7 +102,6 @@ func (m *Manager) HandleWS(w http.ResponseWriter, r *http.Request) {
 	m.Engine.PlayerConnected(count)
 	m.mu.Unlock()
 
-	// Envia mensagem de configuração inicial informando qual lado ele assumiu
 	setupMsg := SetupMessage{
 		Type: "setup",
 		Side: assignedSide,
@@ -98,25 +110,23 @@ func (m *Manager) HandleWS(w http.ResponseWriter, r *http.Request) {
 		conn.WriteMessage(websocket.TextMessage, payload)
 	}
 
-	// Inicia a escuta de dados recebidos por este cliente em uma goroutine separada
 	go m.readLoop(conn, assignedSide)
 }
 
-// readLoop processa os pacotes recebidos de cada cliente ativo
+// readLoop processa pacotes do cliente e renova prazos de leitura
 func (m *Manager) readLoop(conn *websocket.Conn, side string) {
 	defer func() {
 		conn.Close()
 
 		m.mu.Lock()
-		if side == "left" {
+		if side == "left" && m.PlayerLeft == conn {
 			m.PlayerLeft = nil
-			fmt.Println("Lobby: Jogador 1 (Esquerda) desconectado.")
-		} else if side == "right" {
+			fmt.Println("Lobby: Jogador 1 (Esquerda) desconectado da vaga.")
+		} else if side == "right" && m.PlayerRight == conn {
 			m.PlayerRight = nil
-			fmt.Println("Lobby: Jogador 2 (Direita) desconectado.")
+			fmt.Println("Lobby: Jogador 2 (Direita) desconectado da vaga.")
 		}
 		
-		// Atualiza a engine física sobre a desconexão de um dos lados
 		m.Engine.PlayerDisconnected()
 		m.mu.Unlock()
 	}()
@@ -124,52 +134,89 @@ func (m *Manager) readLoop(conn *websocket.Conn, side string) {
 	for {
 		_, payload, err := conn.ReadMessage()
 		if err != nil {
-			break // Sai do loop para acionar o defer e desconectar o cliente
+			// Se estourar o deadline de leitura ou houver queda, quebra o loop e desconecta
+			break
 		}
 
-		// Processa mensagens
+		// A cada mensagem recebida com sucesso, renovamos o prazo limite de leitura
+		conn.SetReadDeadline(time.Now().Add(pongWait))
+
 		var msg ClientMessage
 		if err := json.Unmarshal(payload, &msg); err == nil {
 			if msg.Type == "input" {
-				// Recebeu comando de movimento de raquete
 				m.Engine.SetPaddleDir(side, msg.Dir)
 			} else if msg.Type == "ready" {
-				// Recebeu solicitação para alternar o status de pronto
 				m.Engine.ToggleReady(side)
 			}
 		}
 	}
 }
 
-// StartGameLoop roda a 30 FPS computando as regras e atualizando ambos os clientes em tempo real
+// StartGameLoop roda a 30 FPS atualizando a física e enviando pings periódicos para expurgar conexões zumbis
 func (m *Manager) StartGameLoop() {
 	ticker := time.NewTicker(33 * time.Millisecond) // ~30 FPS
 	defer ticker.Stop()
 
 	for range ticker.C {
-		// 1. Atualiza regras físicas da bola e raquetes na engine
+		// 1. Atualiza engine física
 		m.Engine.Update()
+
+		// 2. Lógica periódica de envio de Pings (Heartbeat) a cada 4 segundos (~120 ticks)
+		m.tickCount++
+		if m.tickCount >= 120 {
+			m.tickCount = 0
+			m.sendPings()
+		}
 
 		m.mu.Lock()
 		left := m.PlayerLeft
 		right := m.PlayerRight
 		m.mu.Unlock()
 
-		// 2. Se houver pelo menos um jogador conectado, transmite o novo JSON de estado
+		// 3. Transmite o novo JSON de estado
 		if left != nil || right != nil {
 			payload, err := m.Engine.GetStateJSON()
 			if err == nil {
 				if left != nil {
+					left.SetWriteDeadline(time.Now().Add(writeWait))
 					if err := left.WriteMessage(websocket.TextMessage, payload); err != nil {
-						// Ignora erro aqui, a desconexão será tratada automaticamente pelo loop de leitura
+						// Erro de escrita é tratado fechando e forçando a queda no loop de leitura
+						left.Close()
 					}
 				}
 				if right != nil {
+					right.SetWriteDeadline(time.Now().Add(writeWait))
 					if err := right.WriteMessage(websocket.TextMessage, payload); err != nil {
-						// Ignora erro aqui
+						right.Close()
 					}
 				}
 			}
+		}
+	}
+}
+
+// sendPings envia de forma segura um pacote de Ping a ambos os lados ativos para validar se continuam vivos
+func (m *Manager) sendPings() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.PlayerLeft != nil {
+		m.PlayerLeft.SetWriteDeadline(time.Now().Add(writeWait))
+		if err := m.PlayerLeft.WriteMessage(websocket.PingMessage, nil); err != nil {
+			fmt.Printf("Ping falhou para Player Left, expurgando conexao zumbi: %v\n", err)
+			m.PlayerLeft.Close()
+			m.PlayerLeft = nil
+			m.Engine.PlayerDisconnected()
+		}
+	}
+
+	if m.PlayerRight != nil {
+		m.PlayerRight.SetWriteDeadline(time.Now().Add(writeWait))
+		if err := m.PlayerRight.WriteMessage(websocket.PingMessage, nil); err != nil {
+			fmt.Printf("Ping falhou para Player Right, expurgando conexao zumbi: %v\n", err)
+			m.PlayerRight.Close()
+			m.PlayerRight = nil
+			m.Engine.PlayerDisconnected()
 		}
 	}
 }
