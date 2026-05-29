@@ -2,6 +2,7 @@ package game
 
 import (
 	"encoding/json"
+	"fmt"
 	"math/rand"
 	"sync"
 	"time"
@@ -78,7 +79,7 @@ func (e *Engine) ResetPositions() {
 	e.PaddleRightDir = 0
 }
 
-// PlayerConnected atualiza o status de transição de conexão de novos jogadores
+// PlayerConnected atualiza o status de transição de conexão de novos jogadores com logs detalhados
 func (e *Engine) PlayerConnected(count int) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -88,6 +89,7 @@ func (e *Engine) PlayerConnected(count int) {
 		e.PlayerLeftReady = false
 		e.PlayerRightReady = false
 		e.ResetPositions()
+		fmt.Printf("[ENGINE] Estado atualizado: %s (Jogadores conectados: %d/2)\n", e.Status, count)
 	} else if count == 2 && e.Status == "waiting_players" {
 		// Ambos conectados, entra no lobby para esperar que fiquem prontos
 		e.Status = "waiting_ready"
@@ -96,10 +98,11 @@ func (e *Engine) PlayerConnected(count int) {
 		e.ScoreLeft = 0
 		e.ScoreRight = 0
 		e.ResetPositions()
+		fmt.Println("[ENGINE] Ambos os jogadores conectados! Entrando no estado de Lobby (Aguardando Pronto)")
 	}
 }
 
-// PlayerDisconnected reinicia a engine para aguardar jogadores se um desconectar
+// PlayerDisconnected reinicia a engine para aguardar jogadores se um desconectar com logs detalhados
 func (e *Engine) PlayerDisconnected() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -110,9 +113,10 @@ func (e *Engine) PlayerDisconnected() {
 	e.ScoreLeft = 0
 	e.ScoreRight = 0
 	e.ResetPositions()
+	fmt.Println("[ENGINE] Conexao perdida. Retornando ao estado inicial: waiting_players")
 }
 
-// ToggleReady muda o status do jogador de pronto/lobby
+// ToggleReady muda o status do jogador de pronto/lobby com logs detalhados
 func (e *Engine) ToggleReady(side string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -124,13 +128,16 @@ func (e *Engine) ToggleReady(side string) {
 
 	if side == "left" {
 		e.PlayerLeftReady = !e.PlayerLeftReady
+		fmt.Printf("[ENGINE] LOBBY: Jogador 1 [ESQUERDA] alterou status de PRONTO para: %t\n", e.PlayerLeftReady)
 	} else if side == "right" {
 		e.PlayerRightReady = !e.PlayerRightReady
+		fmt.Printf("[ENGINE] LOBBY: Jogador 2 [DIREITA] alterou status de PRONTO para: %t\n", e.PlayerRightReady)
 	}
 
 	// Se ambos estiverem prontos, inicia a partida de fato!
 	if e.PlayerLeftReady && e.PlayerRightReady {
 		e.Status = "playing"
+		fmt.Println("[ENGINE] PARTIDA INICIADA! Ambos os jogadores estao prontos.")
 		e.triggerReset("left") // O primeiro saque do jogo vai em direção à esquerda (P1)
 	}
 }
@@ -150,8 +157,10 @@ func (e *Engine) launchBall() {
 	speedX := 2.0
 	if e.lastScorer == "left" {
 		e.BallVX = -speedX // Lança para o jogador da esquerda
+		fmt.Println("[ENGINE] SAQUE: Bola lancada em direcao a ESQUERDA")
 	} else {
 		e.BallVX = speedX // Lança para o jogador da direita
+		fmt.Println("[ENGINE] SAQUE: Bola lancada em direcao a DIREITA")
 	}
 	
 	// Angulação vertical aleatória
@@ -169,9 +178,15 @@ func (e *Engine) SetPaddleDir(side string, dir float64) {
 	}
 
 	if side == "left" {
-		e.PaddleLeftDir = dir
+		if e.PaddleLeftDir != dir {
+			e.PaddleLeftDir = dir
+			fmt.Printf("[ENGINE] INPUT: Raquete [ESQUERDA] mudou direcao para: %.0f\n", dir)
+		}
 	} else if side == "right" {
-		e.PaddleRightDir = dir
+		if e.PaddleRightDir != dir {
+			e.PaddleRightDir = dir
+			fmt.Printf("[ENGINE] INPUT: Raquete [DIREITA] mudou direcao para: %.0f\n", dir)
+		}
 	}
 }
 
@@ -201,6 +216,7 @@ func (e *Engine) Update() {
 				e.ScoreLeft = 0
 				e.ScoreRight = 0
 				e.ResetPositions()
+				fmt.Println("[ENGINE] Fim do congelamento de Game Over. Retornando ao Lobby.")
 			}
 		}
 		// Durante congelamentos leves de ponto, ainda permitimos a movimentação de raquetes
@@ -240,6 +256,7 @@ func (e *Engine) Update() {
 			// Inverte direção horizontal e aumenta velocidade em 5%
 			e.BallVX = -e.BallVX * 1.05
 			e.BallVY = normalizedRelativeIntersectY * 2.0 * 1.05
+			fmt.Printf("[ENGINE] REBATIDA: Raquete [ESQUERDA] colidiu com a bola. Aceleração horizontal: %.2f\n", e.BallVX)
 		}
 	}
 
@@ -253,6 +270,7 @@ func (e *Engine) Update() {
 
 			e.BallVX = -e.BallVX * 1.05
 			e.BallVY = normalizedRelativeIntersectY * 2.0 * 1.05
+			fmt.Printf("[ENGINE] REBATIDA: Raquete [DIREITA] colidiu com a bola. Aceleração horizontal: %.2f\n", e.BallVX)
 		}
 	}
 
@@ -268,7 +286,7 @@ func (e *Engine) Update() {
 	}
 }
 
-// checkRoundEnd verifica se o ponto decretou fim da partida ou apenas fim do round
+// checkRoundEnd verifica se o ponto decretou fim da partida ou apenas fim do round com logs detalhados
 func (e *Engine) checkRoundEnd(targetDirection string) {
 	// Regras da vitória clássicas: 
 	// 1. Um jogador precisa marcar pelo menos 11 pontos.
@@ -278,15 +296,18 @@ func (e *Engine) checkRoundEnd(targetDirection string) {
 		e.timerTicks = GameOverTicks
 		e.BallVX = 0
 		e.BallVY = 0
+		fmt.Printf("[ENGINE] VITÓRIA! Partida encerrada. Jogador 1 [ESQUERDA] VENCEU por %d - %d!\n", e.ScoreLeft, e.ScoreRight)
 	} else if e.ScoreRight >= MaxScore && (e.ScoreRight-e.ScoreLeft) >= 2 {
 		e.Status = "gameover"
 		e.timerTicks = GameOverTicks
 		e.BallVX = 0
 		e.BallVY = 0
+		fmt.Printf("[ENGINE] VITÓRIA! Partida encerrada. Jogador 2 [DIREITA] VENCEU por %d - %d!\n", e.ScoreRight, e.ScoreLeft)
 	} else {
 		// Caso contrário, apenas congela para rodar o próximo saque
 		e.Status = "point_scored"
 		e.triggerReset(targetDirection)
+		fmt.Printf("[ENGINE] PONTO! Placar atualizado: ESQ %d - %d DIR. Congelando partida por 2s.\n", e.ScoreLeft, e.ScoreRight)
 	}
 }
 
